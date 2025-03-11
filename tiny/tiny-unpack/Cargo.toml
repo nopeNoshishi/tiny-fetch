@@ -1,0 +1,10 @@
+[package]
+name = "tiny-unpack"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow.workspace = true
+flate2.workspace = true
+hex.workspace = true
+sha1.workspace = true
