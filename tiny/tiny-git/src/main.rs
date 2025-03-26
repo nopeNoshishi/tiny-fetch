@@ -93,57 +93,48 @@ fn main() -> Result<()> {
             stdout.flush()?;
         }
         TinyGitSubcommand::Unpack => {
-            let stdio = stdin();
-            let entries = unpack(stdio)?;
+            let entries = unpack(stdin())?;
 
-            // 簡易的に書き込んだことにする
-            let mut fs = std::fs::File::create("success.txt")?;
-            for (hash, (content, obj_type)) in entries.into_iter() {
-                fs.write_all(
-                    format!("{}: {} {}\n", obj_type.as_str(), hash, content.len()).as_bytes(),
-                )?;
-            }
-            fs.flush()?;
+            write_entries_to_file(entries, "success.txt")?;
         }
         TinyGitSubcommand::Push { revision } => {
             let ssh = ssh(cli.username, cli.password, cli.host, cli.port)?;
 
-            // `packed data` を取得
             let packed = pack(revision.clone())?;
 
-            // チャンネルを生成してサーバーでコマンドを実行し、プロセスの入力を渡す
             let mut channel = ssh.channel_session()?;
             channel.exec("./tiny-git unpack")?;
             channel.write_all(&packed)?;
             channel.flush()?;
 
-            // サーバーのプロセス出力を受け取っておく
             let mut s = Vec::new();
             channel.read_to_end(&mut s)?;
         }
         TinyGitSubcommand::Pull { revision } => {
             let ssh = ssh(cli.username, cli.password, cli.host, cli.port)?;
 
-            // チャンネルを生成してサーバーでコマンドを実行し、プロセスの出力を取得する
             let mut channel = ssh.channel_session()?;
             channel.exec(&format!("./tiny-git pack --revision {}", revision))?;
             let mut packed = Vec::new();
             channel.read_to_end(&mut packed)?;
 
-            // 取得した `packed data` を `unpack`
             let entries = unpack(&packed[..])?;
 
-            // 簡易的に読み込んだことにする
-            let mut fs = std::fs::File::create("success.txt")?;
-            for (hash, (content, obj_type)) in entries.into_iter() {
-                fs.write_all(
-                    format!("{}: {} {}\n", obj_type.as_str(), hash, content.len()).as_bytes(),
-                )?;
-            }
-            fs.flush()?;
+            write_entries_to_file(entries, "success.txt")?;
         }
     }
 
+    Ok(())
+}
+
+fn write_entries_to_file(entries: HashMap<String, (Vec<u8>, PackObjectType)>, filename: &str) -> Result<()> {
+    let mut fs = std::fs::File::create(filename)?;
+    for (hash, (content, obj_type)) in entries.into_iter() {
+        fs.write_all(
+            format!("{}: {} {}\n", obj_type.as_str(), hash, content.len()).as_bytes(),
+        )?;
+    }
+    fs.flush()?;
     Ok(())
 }
 
@@ -191,7 +182,6 @@ fn read_bytes<R: Read, const N: usize>(reader: &mut R, buffer: &mut [u8; N]) -> 
 }
 
 fn read_header<R: Read>(pack: &mut R) -> Result<(String, u32, u32)> {
-    // 全てのメタデータは 4 bytes
     let mut buffer = [0; 4];
 
     read_bytes(pack, &mut buffer)?;
@@ -234,7 +224,7 @@ fn read_size<R: Read>(pack: &mut R) -> Result<usize> {
         let (is_continue, value) = read_size_bits(pack)?;
 
         size += (value as usize) << shift;
-        // Stop if this is the last byte
+
         if !is_continue {
             return Ok(size);
         }
@@ -277,21 +267,15 @@ fn read_copy_instruction_offset_and_size<R: Read>(
 ) -> Result<(usize, usize)> {
     let mut offset = 0;
 
-    // 下位 4 ビットが offset のバイト数を示す。
-    // ビットが立っている場合だけ 1 バイトを読み込み、(index*8) ビット左にシフトして offset に格納する。
     for index in 0..4 {
-        // もし最下位ビットが 1 なら、この offset のバイトが存在するということ
         if instruction & 0b0000_0001 != 0 {
             let mut buffer = [0; 1];
             read_bytes(instructions, &mut buffer)?;
             offset |= (buffer[0] as usize) << (index * 8);
         }
-        // 1 ビット分右シフトして、次のビットをチェックできるようにする
         instruction >>= 1;
     }
 
-    // 続く 3 ビットが size のバイト数を示す。
-    // 同様に、ビットが立っていれば 1 バイト読み込み、(index*8) だけ左シフトして size に格納する。
     let mut size = 0;
     for index in 0..3 {
         if instruction & 0b0000_0001 != 0 {
@@ -302,7 +286,6 @@ fn read_copy_instruction_offset_and_size<R: Read>(
         instruction >>= 1;
     }
 
-    // size が 0 の場合は 65536 (0x10000) と解釈する
     if size == 0 {
         size = 0x10000_usize
     }
@@ -326,26 +309,18 @@ fn reconstruct(mut delta_data: &[u8], base_content: &[u8]) -> Result<Vec<u8>> {
     let mut reconstruct_content = Vec::new();
     loop {
         let mut instruction = [0; 1];
-        // 命令 1 バイトを読み込む (もしここでデータが尽きたら break)
         if read_bytes(&mut delta_data, &mut instruction).is_err() {
             break;
         }
 
-        // Insert 命令: MSBが 0 の場合
         if instruction[0] & 0b1000_0000 == 0 {
             let add_size = instruction[0];
-
-            // insert するバイト数だけ読み込んで、それをそのまま出力に追加
             let mut data = vec![0; add_size as usize];
             delta_data.read_exact(&mut data)?;
             reconstruct_content.extend(data);
-
-        // Copy 命令: MSB が 1 の場合
         } else {
-            // offset と size を読み取り、その範囲を base_content からコピーする
             let (offset, size) =
                 read_copy_instruction_offset_and_size(instruction[0], &mut delta_data)?;
-            // base_content の [offset..offset+size] をコピー
             let copy_data = base_content.get(offset..(offset + size)).unwrap();
             reconstruct_content.extend_from_slice(copy_data);
         }
@@ -383,7 +358,9 @@ fn unpack<R: Read>(reader: R) -> Result<HashMap<String, (Vec<u8>, PackObjectType
                 let hash = hash(obj_type, &reconstruct_content);
                 stores.insert(hash, (reconstruct_content, obj_type.clone()));
             }
-            PackObjectType::OfsDelta => {}
+            PackObjectType::OfsDelta => {
+                unimplemented!()
+            }
             _ => {
                 let (content, _, _) = read_compressed_data(&mut pack, content_size)?;
                 let hash = hash(&obj_type, &content);

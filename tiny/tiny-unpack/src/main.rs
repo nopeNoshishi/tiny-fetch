@@ -51,7 +51,6 @@ fn read_bytes<R: Read, const N: usize>(reader: &mut R, buffer: &mut [u8; N]) -> 
 }
 
 fn read_header<R: Read>(pack: &mut R) -> Result<(String, u32, u32)> {
-    // 全てのメタデータは 4 bytes
     let mut buffer = [0; 4];
 
     read_bytes(pack, &mut buffer)?;
@@ -94,7 +93,7 @@ fn read_size<R: Read>(pack: &mut R) -> Result<usize> {
         let (is_continue, value) = read_size_bits(pack)?;
 
         size += (value as usize) << shift;
-        // Stop if this is the last byte
+
         if !is_continue {
             return Ok(size);
         }
@@ -177,20 +176,16 @@ fn reconstruct(mut delta_data: &[u8], base_content: &[u8]) -> Result<Vec<u8>> {
     let mut reconstruct_content = Vec::new();
     loop {
         let mut instruction = [0; 1];
-        // end of instruction
         if read_bytes(&mut delta_data, &mut instruction).is_err() {
             break;
         }
 
-        // Insert Instruction
         if instruction[0] & 0b1000_0000 == 0 {
             let add_size = instruction[0];
 
             let mut data = vec![0; add_size as usize];
             delta_data.read_exact(&mut data)?;
             reconstruct_content.extend(data);
-
-        // Copy Instruction
         } else {
             let (offset, size) =
                 read_copy_instruction_offset_and_size(instruction[0], &mut delta_data)?;
@@ -203,8 +198,7 @@ fn reconstruct(mut delta_data: &[u8], base_content: &[u8]) -> Result<Vec<u8>> {
 }
 
 fn main() -> Result<()> {
-    let stdio = stdin();
-    let mut pack = BufReader::new(stdio);
+    let mut pack = BufReader::new(stdin());
 
     let (signature, version, entries) = read_header(&mut pack)?;
     println!("signature: {signature}\nversion: {version}\nentries: {entries}");
@@ -219,7 +213,7 @@ fn main() -> Result<()> {
             let size = read_size(&mut pack)?;
             content_size += size << 4;
         }
-        println!("object type: {obj_type:?}\ncontent size: {content_size}");
+        println!("object type: {obj_type:?}");
 
         match obj_type {
             PackObjectType::RefDelta => {
